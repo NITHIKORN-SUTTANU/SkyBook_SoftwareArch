@@ -1,446 +1,307 @@
-# SkyBook — Airline Reservation System
-## Software Architecture Design Document
+# SkyBook — Software Architecture Design Document
 
-**Case Study 10 | April 2026**
+**Case Study 10 | Airline Reservation System**
+**Author:** 
+6731503011-DechawatWetprasit
+6731503015-Teerapat Sukkasem
+6731503018-Nithanthip Kulmong
+6731503019-Nithikorn Suttanu
+**Date:** April 2026
 
 ---
 
-## 1. Background and Organisation
+## 1. Overview
 
-SkyBook is the reservation system for a regional airline. It covers **40 routes across 15 cities**, selling tickets through its own website, mobile app, and third-party travel agencies. The system handles search, booking, seat selection, check-in, and boarding — all digitally.
+SkyBook is the reservation system for a regional airline running 40 routes across 15 cities, handling 200 flights per day and up to 25,000 passengers. Tickets are sold through the airline's own website, mobile app, and third-party travel agencies.
 
-**Scale:** ~200 flights per day, up to 25,000 passengers per day.
+The current system was built in the 1990s and has five known problems:
 
-### Stakeholders
+| # | Problem |
+|---|---------|
+| 1 | Overbooking happens because seat counts are not synchronised across sales channels |
+| 2 | The system slows down when many passengers check in close to departure time |
+| 3 | Passengers are not notified when a flight is delayed or cancelled |
+| 4 | Seat selection rules are applied inconsistently depending on which channel is used |
+| 5 | Travel agency bookings take up to 10 minutes to confirm |
 
-| Who | What they do in the system |
-|---|---|
-| Passenger | Search flights, book tickets, select seats, check in online |
-| Travel Agent | Book on behalf of customers via API |
-| Ground Staff | Access passenger manifests, manage boarding gates |
-| Flight Operations | Monitor schedules, handle delays and cancellations |
-| Revenue Management | Update ticket pricing rules |
-
-### Why we need a new system
-
-The current system was built in the 1990s. These are the five specific problems it has:
-
-| ID | Problem | What actually goes wrong |
-|---|---|---|
-| P-01 | Seat inventory not synced across channels | Two passengers can book the same seat at the same time |
-| P-02 | Check-in load not managed | System becomes slow when all passengers check in near departure |
-| P-03 | No automatic notifications | Passengers only find out about delays when they arrive at the airport |
-| P-04 | Seat selection rules inconsistently enforced | Some channels let passengers bypass fare restrictions |
-| P-05 | Travel agency confirmations take up to 10 minutes | Agents cannot confirm a booking in real time |
+This document describes the new architecture that fixes each of these problems.
 
 ---
 
 ## 2. Functional Requirements
 
-These are the six things the new system must be able to do, directly from the case:
-
-| ID | Requirement | Description |
-|---|---|---|
-| FR-01 | Flight Search | Passengers search by route and date, see available seats and fares |
-| FR-02 | Ticket Booking | Book tickets, select seats, add baggage options |
-| FR-03 | Online Check-In | Opens 24 hours before departure, generates boarding pass |
-| FR-04 | Ground Staff Access | View live passenger manifests and manage boarding |
-| FR-05 | Automatic Notifications | System notifies all affected passengers when a flight is delayed or cancelled |
-| FR-06 | Pricing Rule Updates | Revenue management updates pricing rules without shutting the system down |
+| ID | What the system must do |
+|----|------------------------|
+| FR1 | Passengers can search flights by route and date, and see available seats and fares |
+| FR2 | Passengers can book a ticket, select a seat, and add baggage |
+| FR3 | Online check-in opens exactly 24 hours before departure |
+| FR4 | Ground staff can view the passenger list and manage boarding |
+| FR5 | Passengers are automatically notified when their flight is delayed or cancelled |
+| FR6 | Revenue management can change pricing rules while the system stays running |
+| FR7 | Travel agents can book tickets through an API and receive confirmation immediately |
 
 ---
 
 ## 3. Quality Attributes
 
-Quality attributes describe *how well* the system must perform — not just what it does.
-
-We focus on **five quality attributes** that are most critical for SkyBook's problems. Each one maps directly to a real problem in the case.
-
----
-
-### QA-01: Availability
-> *The system must be operational when it is needed.*
-
-SkyBook runs 24/7. The highest-risk window is the 6 hours before departure when check-in peaks and ground staff need live manifests at the gate.
-
-- **Source of concern:** P-02 (system slows down under load)
-- **Stimulus:** All 200 flights concentrate check-in activity into one busy morning window
-- **Response:** The system stays fully operational — no slowdown, no crash
-- **Measure:** 99.9% uptime (the system can be down for at most ~9 hours per year)
-
----
-
-### QA-02: Performance
-> *How fast the system responds when an event happens. Lower latency = better.*
-
-Passengers expect search results quickly. Travel agents need booking confirmation in seconds, not minutes.
-
-- **Source of concern:** P-05 (10-minute confirmation delay)
-- **Stimulus:** 10× normal traffic hits the system during a school holiday booking rush
-- **Response:** Flight search returns results at normal speed
-- **Measure:** Flight search responds in under 500ms at p95. Booking confirmation in under 3 seconds.
-
----
-
-### QA-03: Modifiability
-> *The cost of making a change — what can change, when, and who changes it.*
-
-Revenue Management needs to change pricing rules frequently (peak hours, promotions, holidays) without the engineering team having to redeploy the whole system.
-
-- **Source of concern:** P-04 (rules inconsistently enforced), plus FR-06
-- **What can change:** Pricing rules — fare tiers, seat selection restrictions, surcharges
-- **Who changes it:** Revenue Management team (non-technical users), without engineer help
-- **When:** During live sales, with no downtime
-- **Measure:** Rule change takes effect across all channels within 30 seconds, zero downtime
-
----
-
-### QA-04: Security
-> *The system resists unauthorised access while still serving legitimate users.*
-
-Travel agents call the booking API from outside the airline's network. Payment data must be protected. Ground staff manifests must only be seen by authorised staff.
-
-- **Source of concern:** Multi-channel access (P-01, P-04) creates risk of unauthorised booking manipulation
-- **Stimulus:** An unauthorised party tries to call the booking API directly
-- **Response:** The request is blocked at the API Gateway before reaching any service
-- **Measure:** 100% of API calls require a valid token. All access attempts are logged.
-
-Security properties we care about (from lecture):
-- **Confidentiality** — payment data encrypted in transit (TLS 1.3) and never stored raw
-- **Integrity** — booking records cannot be modified outside authorised channels
-- **Auditing** — every booking and change action is logged with who did it and when
-
----
-
-### QA-05: Modifiability (UI)
-> *Supporting usability changes without touching backend code.*
-
-We also include **Usability** as a quality attribute because ground staff need to access manifests and scan boarding passes under time pressure. The system must be easy enough that they can do critical tasks in 2 steps, even if the network at the gate drops.
-
-- **Stimulus:** Ground staff member needs to pull up the manifest during an unexpected gate change, 10 minutes before departure
-- **Response:** Manifest is accessible in 2 taps; works offline from cached data if network is unavailable
-- **Measure:** Critical tasks completable in ≤ 2 navigation steps; offline mode available
+| ID | Quality Attribute | Requirement |
+|----|-------------------|-------------|
+| QA1 | **Consistency** | Two passengers must never be confirmed into the same seat |
+| QA2 | **Availability** | The system must stay operational during the peak check-in window near departure |
+| QA3 | **Performance** | Travel agent bookings must confirm within 3 seconds |
+| QA4 | **Reliability** | Every affected passenger must receive a notification when a flight is cancelled |
+| QA5 | **Modifiability** | Pricing rules must be changeable without restarting any service |
+| QA6 | **Scalability** | The system must handle booking spikes during weekends and school holidays |
 
 ---
 
 ## 4. Architecture Model
 
-### 4.1 Architecture Style: Microservices
+### 4.1 Architecture Style
 
-We chose a **microservices architecture**. This means each major capability is a separate, independently deployable service with its own database.
+**Microservices with an Event-Driven backbone.**
 
-**Why not a single system (monolith)?**
-The five services in SkyBook have completely different load patterns:
-- Check-In Service gets hammered for 2 hours before each departure, then goes quiet
-- Pricing Engine changes rarely and handles low traffic
-- Booking Service has unpredictable spikes during sales
+Each part of the system is its own independent service. Services communicate by publishing and consuming events through **Apache Kafka** for background work, and call each other directly only when an immediate response is required. This means:
 
-If we built one big system, we would need to scale everything just to handle check-in peaks — which wastes resources. Worse, a bug in the Notification Service would crash the Booking Service too.
+- One service failing does not bring down the others
+- There is one single Inventory Service that all sales channels go through — eliminating the split-inventory overbooking problem
+- Background work (notifications, baggage sync) does not slow down or block the booking response
 
-With microservices:
-- Each service scales independently
-- A crash in one service does not take down others
-- Revenue Management can update the Pricing Engine without touching Booking
+### 4.2 Services
 
-**How services communicate:**
-- **Synchronous (REST/HTTP):** For things passengers are waiting for — search results, booking confirmation
-- **Asynchronous (Apache Kafka):** For things that happen in the background — notifications, manifest updates, inventory sync
+| Service | What it does |
+|---------|-------------|
+| **API Gateway** | Single entry point for the website and mobile app. Routes requests to the correct service |
+| **Flight Search Service** | Returns available routes, dates, seat counts, and fares |
+| **Inventory Service** | The only service that controls seat availability. Places and releases seat locks |
+| **Booking Service** | Creates booking records, enforces all fare and seat selection rules, and handles rebooking |
+| **Check-in Service** | Activates exactly 24 hours before departure. Issues boarding passes |
+| **Notification Service** | Sends email notifications to passengers for delays, cancellations, and booking confirmations |
+| **Boarding Service** | Gives ground staff access to the passenger manifest and boarding status |
+| **Pricing Service** | Manages fare rules. Reloads updated rules at runtime without restarting |
+| **Agent API Gateway** | Separate entry point for travel agents. Returns synchronous booking confirmation |
 
----
-
-### 4.2 Use Case Diagram
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        SkyBook System                           │
-│                                                                 │
-│  Passenger ──────── Search Flights                              │
-│  Passenger ──────── Book Ticket & Select Seat                   │
-│  Passenger ──────── Online Check-In                             │
-│  Passenger ──────── Receive Delay / Cancellation Notification   │
-│                                                                 │
-│  Travel Agent ───── Book Ticket via API                         │
-│                                                                 │
-│  Ground Staff ───── View Passenger Manifest                     │
-│  Ground Staff ───── Manage Boarding                             │
-│                                                                 │
-│  Flight Operations ─ Trigger Delay / Cancellation              │
-│                                                                 │
-│  Revenue Management  Update Pricing Rules                       │
-└─────────────────────────────────────────────────────────────────┘
-```
-
----
+> **Why email only for notifications?**
+> Every passenger provides an email address at booking time. SkyBook is a regional airline on 40 routes — adding SMS would require managing SMS gateway contracts across multiple regions for a system that already has reliable email contact for all passengers.
 
 ### 4.3 Component Diagram
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│  CLIENTS                                                         │
-│  [Passenger Web/Mobile]  [Travel Agent API]  [Ground Staff PWA]  │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │ HTTPS
-                    ┌────────▼────────┐
-                    │   API Gateway   │  ← checks login, routes requests
-                    └────────┬────────┘
-           ┌─────────────────┼──────────────────┐
-           │                 │                  │
-  ┌────────▼───────┐  ┌──────▼──────┐  ┌────────▼────────┐
-  │ Flight Search  │  │   Booking   │  │  Check-In       │
-  │   Service      │  │   Service   │  │  Service        │
-  │ (Elasticsearch)│  │ (Redis Lock)│  │  (SQS Queue)    │
-  └────────────────┘  └──────┬──────┘  └────────┬────────┘
-                             │                  │
-                    ┌────────▼──────────────────▼────────┐
-                    │         Inventory Service          │
-                    │  (single source of truth for seats)│
-                    └──────────────────┬─────────────────┘
-                                       │
-        ┌──────────────────────────────▼──────────────────────────┐
-        │                  Apache Kafka (Event Bus)               │
-        │  Topics: booking.confirmed · flight.cancelled ·         │
-        │          flight.delayed · seat.released                 │
-        └──────┬──────────────────────┬──────────────────┬────────┘
-               │                      │                  │
-     ┌─────────▼──────┐   ┌───────────▼──────┐  ┌───────▼──────────┐
-     │ Notification   │   │  Flight Ops       │  │  Pricing Engine  │
-     │ Service        │   │  Service          │  │  (Config DB,     │
-     │ (email/SMS/    │   │                   │  │   hot-reload)    │
-     │  push)         │   │                   │  │                  │
-     └────────────────┘   └───────────────────┘  └──────────────────┘
-
-  DATA STORES:
-  PostgreSQL (bookings, manifests) · Redis (cache + seat locks) · Elasticsearch (search)
+  Website / Mobile App     Travel Agents       Flight Operations
+         │                      │                      │
+         ▼                      ▼                      ▼
+  ┌─────────────┐    ┌──────────────────┐    publishes flight
+  │ API Gateway │    │ Agent API Gateway│    status events
+  └──────┬──────┘    └────────┬─────────┘              │
+         │                    │                        │
+    ┌────┼──────────┐          │                        │
+    ▼    ▼          ▼          │                        │
+  ┌────┐ ┌────────┐ ┌────────┐ │                        │
+  │Flt.│ │Booking │ │Check-in│ │                        │
+  │Srch│ │Service │ │Service │ │                        │
+  └────┘ └───┬────┘ └────┬───┘ │                        │
+             │           │     │                        │
+             └─────┬─────┘     │                        │
+                   │◄──────────┘                        │
+                   ▼                                    │
+          ┌─────────────────┐                           │
+          │ Inventory Svc   │  ← Single source of       │
+          │ (Redis locking) │    truth for seats         │
+          └────────┬────────┘                           │
+                   │                                    │
+                   └──────────────┬─────────────────────┘
+                                  │
+                                  ▼
+                         ┌─────────────────┐
+                         │  Apache Kafka   │  ← All background events
+                         └──┬──────────┬───┘
+                            │          │
+                            ▼          ▼
+               ┌──────────────┐  ┌──────────────────┐
+               │Notification  │  │Booking Svc       │
+               │  Service     │  │(rebooking only)  │
+               └──────────────┘  │Boarding Svc      │
+                                 │Pricing Svc       │
+                                 └──────────────────┘
 ```
 
-**What each component does:**
+> Both gateways route to the **same Booking Service and Inventory Service** — there is no separate seat count per channel.
 
-| Component | Responsibility |
-|---|---|
-| API Gateway | Checks authentication, rate-limits requests, routes to the right service |
-| Flight Search Service | Returns flight results fast using a pre-built Elasticsearch index |
-| Booking Service | Handles seat reservation with a lock to prevent double-booking |
-| Inventory Service | The only place that knows how many seats are available — all channels read from here |
-| Check-In Service | Processes check-in requests from a queue so the database is not overwhelmed |
-| Notification Service | Listens for flight.cancelled and flight.delayed events, sends email/SMS/push |
-| Pricing Engine | Applies current pricing rules; rules can be updated without restarting the service |
-| Flight Ops Service | Used by Flight Operations to log delays and cancellations |
-| Apache Kafka | The message bus — services publish events here, other services subscribe |
+### 4.4 Use Case Summary
 
----
+**Passenger**
+- Search flights → Flight Search Service
+- Book + select seat → Booking Service → Inventory Service (seat lock applied)
+- Check in → Check-in Service (available exactly 24h before departure)
+- Receive cancellation or delay email → Notification Service
 
-### 4.4 Key Flows
+**Travel Agent**
+- Book via API → Agent API Gateway → Booking Service → Inventory Service → confirmation returned under 3 seconds
 
-These are the three most important flows that directly address the case's design questions.
+**Ground Staff**
+- View passenger manifest → Boarding Service
+- Mark passenger as boarded → Boarding Service → Kafka event
 
-#### Flow A: How we prevent two passengers booking the same seat (solves P-01)
+**Revenue Management**
+- Edit fare rules → Pricing Service admin panel → rules reload within 60 seconds, no restart needed
 
-```
-Passenger A ──► API Gateway ──► Booking Service
-                                      │
-                          Acquire Redis lock on seat 14A
-                          (key: lock:flight:BK101:seat:14A, expires in 10s)
-                                      │
-                    ┌─────────────────┴──────────────────┐
-               Lock acquired                        Lock NOT available
-                    │                                     │
-       Inventory confirms seat available       Return "seat no longer available"
-       Charge payment                          to Passenger B immediately
-       Confirm booking
-       Publish booking.confirmed to Kafka
-       Release lock
-```
-
-The **Redis lock** is the key idea here. Only one booking can hold the lock for seat 14A at a time. If Passenger B tries at the same moment, they get an immediate "unavailable" response — no race condition, no overbooking. The lock automatically expires after 10 seconds so it can never get stuck if the Booking Service crashes.
-
----
-
-#### Flow B: What happens when a flight is cancelled (solves P-03)
-
-```
-Flight Operations ──► Flight Ops Service ──► Publish "flight.cancelled" to Kafka
-                                                          │
-                         ┌────────────────────────────────┼──────────────────┐
-                         │                                │                  │
-               Inventory Service                Notification Service    Rebooking Service
-               Marks all seats unavailable   Queries all affected       Offers alternative
-                                             passengers from database   flights, processes
-                                             Sends email + SMS + push   refunds
-                                             (retries on failure)
-```
-
-This is **event-driven architecture**. Flight Operations triggers one event. The Notification Service and Rebooking Service both react to it independently — they do not need to be called directly. If we add a new requirement (e.g., send alerts to the airport lounge system), we just add another subscriber to Kafka. Nothing else changes.
-
----
-
-#### Flow C: How we handle peak check-in load (solves P-02)
-
-```
-Passengers check in ──► API Gateway ──► SQS Queue (buffer)
-                                               │
-                              Check-In workers drain the queue
-                              at a controlled rate (e.g. 500/min)
-                                               │
-                              Generate boarding pass
-                              Update manifest via Kafka event
-                              Ground Staff PWA updates in real time (WebSocket)
-```
-
-Instead of all 3,000 passengers for one departure hitting the database at the same time, requests go into a queue first. Workers process them at a steady rate. The database never gets overwhelmed. This is the **Control Frequency of Events** performance tactic.
+**Flight Operations**
+- Mark flight as delayed or cancelled → publishes `flight.cancelled` or `flight.delayed` event directly to Kafka → Notification Service and Booking Service each consume the event independently
 
 ---
 
 ## 5. Tactics
 
-A **tactic** is a specific design decision that directly improves one quality attribute. We pick the most important tactic for each quality attribute — the one that solves the actual problem in the case.
+### QA1 — Consistency: No Double Booking
+
+**Tactic: Pessimistic Seat Locking with Redis TTL**
+
+When a passenger selects a seat, the Inventory Service writes a lock for that seat in **Redis** with a 10-minute expiry (TTL). While the lock exists, no other booking from any channel can claim that seat.
+
+- Payment completed within 10 min → lock converts to a confirmed booking in the database
+- Payment not completed within 10 min → Redis automatically deletes the lock, seat becomes available again
+- All channels (website, mobile app, travel agent API) call the same Inventory Service — there is no separate seat count per channel to go out of sync
+
+**Why Redis?** It supports key expiry natively (TTL), operates in memory so lock checks take under 1 millisecond, and handles concurrent write requests from multiple service instances safely.
 
 ---
 
-### 5.1 Availability Tactics — Fault Detection, Recovery, Prevention
+### QA2 — Availability: Surviving the Departure Rush
 
-**Goal:** The system must stay up during peak departure windows. We apply all three groups from the lecture.
+**Tactic: Horizontal Scaling via Kubernetes HPA**
 
-#### Fault Detection — Heartbeat
+The case study states the system becomes slow as passengers check in near departure time. The Check-in Service is the service under heaviest load during this window. It is deployed on **Kubernetes** with a Horizontal Pod Autoscaler (HPA) that adds instances automatically when CPU exceeds 70%.
 
-Each service sends a heartbeat signal to our monitoring system (Prometheus) every 30 seconds. If the signal stops, an alert fires and the team knows which service is down.
+- Normal hours: 2 instances of the Check-in Service running
+- Peak window (final 1–2 hours before departure, when most passengers check in last-minute): scales up to 8 instances automatically
 
-> Why Heartbeat and not Ping/Echo? Because in Heartbeat, *the service itself* initiates the signal. This means even if a service is partially working (can receive pings but is internally broken), the heartbeat will fail because the service can no longer emit it. It catches deeper failures.
-
-#### Fault Recovery — Active Redundancy
-
-The Booking Service and Check-In Service each run with **at least 2 replicas at all times**. All replicas handle requests simultaneously. If one crashes, the other takes all the traffic instantly — zero downtime for users.
-
-For the PostgreSQL database we use **Passive Redundancy**: one primary + one standby that is kept in sync. If the primary fails, the standby is promoted. There is a small delay (seconds) for the promotion to complete, but no data is lost.
-
-#### Fault Prevention — Transaction (Saga Pattern)
-
-Booking involves three steps: reserve seat → charge payment → confirm booking. If the payment fails halfway through, the seat must be released. We use the **Saga pattern**: each step publishes an event. If any step fails, a compensating event automatically reverses the previous steps. No partial bookings are ever saved to the database.
+The **Check-in Service database** also uses a read replica. Passengers viewing their boarding pass go to the replica. Only write operations (confirming check-in, issuing a boarding pass) go to the primary database. This prevents read traffic from competing with writes during the rush.
 
 ---
 
-### 5.2 Modifiability Tactics — Localise Modification and Prevent Ripple Effect
+### QA3 — Performance: Fast Travel Agent Confirmation
 
-**Goal:** Revenue Management can change pricing rules without the engineering team, and changing one service does not break other services.
+**Tactic: Dedicated Synchronous Agent API Gateway**
 
-#### Localise Modification — Abstract Common Services
+The current system is slow for travel agents because their requests compete with all other traffic on the same path. The new design gives travel agents their own **Agent API Gateway** that connects directly to the Booking Service and waits for a synchronous response — no queue in between.
 
-The Notification Service is a shared service. Instead of each service (Booking, Flight Ops, Check-In) having its own notification logic, they all call one Notification Service. If we ever need to change from email to WhatsApp, we change it in **one place only**.
+- Target response time: **under 3 seconds**
+- Rate limit: 100 requests/second per agency account
+- Authentication: API key issued per travel agency
 
-#### Prevent Ripple Effect — Use Intermediary (Kafka)
-
-This is the most important modifiability tactic in our architecture. Kafka sits between services that produce events and services that consume them.
-
-**Without Kafka:** Flight Ops Service would need to directly call Notification Service, Rebooking Service, and any future service — every new consumer requires changing Flight Ops code.
-
-**With Kafka:** Flight Ops publishes one event. Any service can subscribe without Flight Ops knowing about it. Adding a new consumer (e.g., a lounge notification system) requires **zero changes** to any existing service.
+Agent traffic is completely isolated from passenger traffic. A surge in passenger bookings during school holidays does not affect agent confirmation speed.
 
 ---
 
-### 5.3 Performance Tactics
+### QA4 — Reliability: Guaranteed Cancellation Notifications
 
-**Goal:** Flight search stays fast under 10× load. Check-in does not crash the database.
+**Tactic: Event-Driven Fan-out with Retry Queue**
 
-#### Resource Demand — Control Frequency of Events
+When Flight Operations marks a flight as cancelled, they publish a `flight.cancelled` event directly to Kafka. This event includes the list of affected passenger email addresses, so downstream services do not need to query another service's database.
 
-During the 24-hour check-in window, check-in requests go into an **SQS queue** before reaching the database. Workers drain the queue at a controlled rate. This directly prevents the P-02 problem — the database never sees all 3,000 passengers at once.
+Two services consume this event independently:
 
-#### Resource Management — Maintain Multiple Copies of Data (Caching)
-
-Flight availability is cached in **Redis** with a 30-second expiry. The Flight Search Service reads from Redis, not from the main database. This means 10× traffic does not increase database load at all — it just hits Redis, which is extremely fast (sub-millisecond).
-
----
-
-### 5.4 Security Tactics
-
-**Goal:** Unauthorised access is blocked. Payment data is protected. All actions are traceable.
-
-#### Resisting Attack — Authenticate and Authorise Users
-
-Every request to the API Gateway must carry a valid **JWT token**. The gateway checks this before routing to any service. Access control is role-based:
-- Passengers: can only see their own bookings
-- Travel Agents: can only create and retrieve bookings
-- Ground Staff: read-only access to manifests
-- Flight Operations: can only write to flight status
-
-#### Recovering from Attack — Maintain Audit Trail
-
-Every action (booking, cancellation, pricing rule change) is logged to a **separate, append-only log store**. Services can write to it but cannot delete or modify entries. If an attack happens, we can trace exactly what changed, who did it, and when.
+- **Notification Service** — sends a cancellation email to every affected passenger in parallel. If an email fails, it retries up to **3 times** with a 30-second wait between attempts. If all 3 retries fail, the failure is logged for manual review by the operations team.
+- **Booking Service** — finds the next available flight on the same route, places a 2-hour seat hold per affected passenger, and provides the rebooking link that is included in the cancellation email.
 
 ---
 
-## 6. Technical Decisions
+### QA5 — Modifiability: Pricing Rule Updates Without Downtime
 
-These are the four most important decisions we made and why.
+**Tactic: Externalized Configuration with Hot Reload**
 
----
+Fare rules (e.g., which fare types allow seat selection, dynamic pricing multipliers) are stored in a **dedicated PostgreSQL configuration table**, not in the Pricing Service code. Revenue management edits rules through an admin panel that writes directly to this table.
 
-### Decision 1: Microservices (not a monolith)
+The Pricing Service polls the table every **60 seconds**. When a change is detected, it reloads the rules into memory — no restart, no redeployment, no impact on bookings in progress.
 
-We chose microservices because the five services in SkyBook have completely different scaling and change needs. Check-In needs to scale out during departure windows; Pricing Engine barely changes. If we built a monolith, a crash in Notifications would take down Booking.
-
-**Trade-off we accept:** More operational complexity. We manage this with Kubernetes (automatic restarts, scaling) and centralised logging (ELK stack).
+**Why PostgreSQL?** It is already used as the primary relational database across services. A separate config server would add unnecessary infrastructure for rules that change at most a few times per day.
 
 ---
 
-### Decision 2: Redis distributed lock for seat booking
+### QA6 — Scalability: Handling Weekend and Holiday Booking Spikes
 
-To prevent two passengers booking the same seat (P-01), we use **Redis Redlock**.
+**Tactic: Async Processing for Non-Critical Work via Kafka**
 
-When Passenger A starts booking seat 14A, the Booking Service sets a key in Redis: `lock:flight:BK101:seat:14A`. This key expires in 10 seconds. If Passenger B tries to book the same seat at the same time, they cannot get the lock and receive an immediate "unavailable" response.
+The case study states the heaviest booking periods are weekends and school holidays. When a passenger completes a booking, the Booking Service immediately returns a confirmation response. Everything that happens after — sending the booking confirmation email, syncing baggage options to the check-in record — runs **asynchronously** as Kafka consumers in the background.
 
-This works across all channels simultaneously — website, mobile app, and travel agency API all go through the same Booking Service.
-
-**Why not a database row lock?** A database lock ties up a database connection for the whole transaction. Redis is in-memory (1,000× faster) and the TTL ensures the lock is released even if the Booking Service crashes mid-transaction.
+The Booking Service does not wait for any of these tasks before responding. This keeps booking response time fast regardless of how many passengers are booking at the same time.
 
 ---
 
-### Decision 3: Apache Kafka as the event bus
+## 6. Technology Decisions
 
-Kafka is the backbone of our async communication. We chose it for three specific reasons:
-
-1. **Replayability:** If the Notification Service crashes during a flight cancellation, when it restarts it replays the `flight.cancelled` event from Kafka and sends all the notifications. With RabbitMQ or SQS, the message would be lost.
-2. **Fan-out:** One `flight.cancelled` event can be consumed by the Notification Service, Rebooking Service, and Inventory Service simultaneously. No producer needs to know who is consuming.
-3. **Order guarantee:** Booking events for the same flight are processed in order (Kafka partitions by flight ID). This matters for seat inventory — you cannot process "seat released" before "seat booked" on the same flight.
-
----
-
-### Decision 4: Hot-reload configuration for pricing rules
-
-Revenue Management updates pricing rules frequently. We store rules in a **configuration database**. The Pricing Engine watches for changes and reloads the new rules without restarting.
-
-This means: Revenue Management changes a rule → it is live in 30 seconds → no engineer is involved → no downtime.
-
-This directly solves FR-06 and the inconsistent rule enforcement in P-04 (rules are now enforced by one centralised engine, not applied differently per channel).
+| Decision | Choice | Reason |
+|----------|--------|--------|
+| Seat lock store | **Redis** | Native TTL; sub-millisecond reads; handles concurrent writes safely |
+| Message broker | **Apache Kafka** | Durable event log; one event consumed independently by multiple services |
+| Container orchestration | **Kubernetes** | Built-in HPA for per-service auto-scaling |
+| Notification channel | **Email** | All passengers provide email at booking; no SMS provider contracts needed |
+| Agent API style | **REST synchronous** | Agents require instant confirmation; async would reintroduce the 10-minute delay |
+| Pricing config store | **PostgreSQL table** | Already in use; no extra infrastructure needed for infrequent rule changes |
+| Database model | **One database per service** | Prevents one service's schema change from breaking another |
 
 ---
 
-## 7. Risks and Trade-Offs
+## 7. Trade-offs
 
-Every architectural decision involves a trade-off. These are the ones we are accepting.
+### Consistency over Availability — Seat Booking
 
-| Risk | The tension | What we do about it |
-|---|---|---|
-| Microservices are complex to operate | Modifiability vs Availability — fixing one service can be hard to trace across the network | We use Kubernetes for automatic restarts and Jaeger for distributed tracing |
-| JWT + TLS adds latency to every request | Security vs Performance — every request is slower because of auth checks | JWT tokens are cached after the first validation. TLS termination is offloaded to the load balancer |
-| Redis lock expires before payment finishes | Availability vs Consistency — under very high load, a 10-second lock might expire mid-payment | We extend the lock TTL to 30 seconds for the payment step |
-| Read replica is slightly behind the primary | Performance vs Consistency — search might show a seat as available when it was just booked | This is acceptable for search display. The Redis lock enforces strict consistency at the actual booking step |
+When the Inventory Service is under heavy load or has a brief network issue, it will **reject new seat lock requests** rather than risk confirming two passengers into the same seat. A failed lock attempt is recoverable — the passenger retries in seconds. A double-booked seat requires staff intervention at the gate. Consistency is the correct priority for a booking system.
 
----
+### Synchronous Agent Path — Less Scalable, but Required
 
-## 8. Summary
-
-Each problem in the case maps to a specific quality attribute and a specific tactic we apply.
-
-| Problem from case | Quality Attribute | Tactic we apply | How it works |
-|---|---|---|---|
-| P-01: Double booking | Availability (Fault Prevention) | Transaction + Redis Distributed Lock | Lock on each seat ID prevents concurrent booking; Saga rolls back on failure |
-| P-02: Check-in slowdown | Performance (Resource Demand) | Control Frequency of Events | SQS queue buffers requests; workers drain at controlled rate |
-| P-03: No notifications | Availability (Fault Recovery) + Modifiability | Checkpoint/Rollback + Use Intermediary (Kafka) | Kafka fan-out triggers Notification Service; missed events replayed on recovery |
-| P-04: Inconsistent seat rules | Modifiability (Localise Modification) | Abstract Common Services | All seat rule logic in one Booking Service; no per-channel variation possible |
-| P-05: Slow agency confirmation | Performance (Resource Management) | Maintain Multiple Copies of Data | Redis cache + read replicas keep Booking Service fast; confirmation under 3 seconds |
-
-The architecture we designed uses **microservices** connected by **Apache Kafka**, with **Redis** handling both seat locking and caching, and **Kubernetes** managing scaling and recovery. Together, these four technical choices address all five problems in the case while meeting the six functional requirements.
+The Agent API Gateway holds a connection open while waiting for a booking response. This is slightly less efficient than async processing. However, the case study explicitly identifies slow confirmation as a problem that must be fixed. Making agent bookings async would reintroduce the same problem. The dedicated gateway isolates agent traffic from passenger traffic, so this efficiency cost has no impact on passenger-facing performance.
 
 ---
 
-*SkyBook Architecture Design — Case Study 10*
+## 8. Flight Cancellation — Full Flow
+
+> Example: Flight SK-110 (Bangkok → Chiang Mai) is cancelled due to weather.
+
+```
+Flight Operations marks SK-110 as CANCELLED
+      │
+      ▼
+Flight Operations publishes event directly to Kafka:
+  {
+    event: "flight.cancelled",
+    flightId: "SK-110",
+    date: "2026-04-20",
+    route: "Bangkok → Chiang Mai",
+    passengers: [ { name: "...", email: "..." }, ... ]
+  }
+      │
+      ├─────────────────────────────────────────────┐
+      ▼                                             ▼
+Notification Service (consumer 1)          Booking Service (consumer 2)
+  │                                                 │
+  │ Reads passenger list from event                 │ Finds next available
+  │ Sends cancellation email to each                │ Bangkok → Chiang Mai flight
+  │ passenger in parallel                           │ Places 2-hour seat hold
+  │ (all emails sent within 30 seconds)             │ per affected passenger
+  │                                                 │
+  │ If email fails → retry x3 (30s gaps)            │
+  │ If all retries fail → log for ops team          │
+  │                                                 │
+  └──────── Email includes rebooking link ──────────┘
+
+Passenger confirms rebooking within 2 hours:
+  └── Seat hold → Confirmed booking
+
+Passenger does not respond within 2 hours:
+  └── Seat hold expires → seat released back to Inventory Service
+                        → refund triggered automatically
+```
+
+---
+
+## 9. Problem-to-Solution Summary
+
+| Original Problem | Solution |
+|-----------------|----------|
+| Overbooking across channels | Single Inventory Service; Redis seat lock with 10-min TTL; all channels use the same service |
+| System slowdown during check-in rush | Kubernetes HPA scales Check-in Service up to 8 instances; read replica on Check-in DB |
+| No passenger notifications | Flight Operations publishes to Kafka → Notification Service emails all affected passengers in parallel |
+| Inconsistent seat selection rules | All bookings enforced through one Booking Service regardless of channel |
+| Slow travel agent confirmation | Dedicated Agent API Gateway; synchronous REST response under 3 seconds |
+| Pricing updates cause downtime | Fare rules in PostgreSQL config table; Pricing Service hot-reloads every 60 seconds |
