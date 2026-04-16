@@ -1,7 +1,7 @@
 # SkyBook — Software Architecture Design Document
 
 **Case Study 10 | Airline Reservation System**
-**Author:** 
+**Author:**
 6731503011-DechawatWetprasit
 6731503015-Teerapat Sukkasem
 6731503018-Nithanthip Kulmong
